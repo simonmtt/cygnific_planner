@@ -1,8 +1,10 @@
 // INITIALIZE FLOW - pick a request to plan
-
+output.markdown('### Validate a new request')
 const requestsTable = base.getTable("Requests");
-const requestRecord = await input.recordAsync('Pick the request to plan', requestsTable);
-
+const newRequestsView = requestsTable.getView('New requests data');
+const requestRecord = await input.recordAsync('Pick the request to plan', newRequestsView);
+// force user to pick record loop to include here
+const requestRecordFormat = requestRecord.getCellValueAsString('Format');
 
 // GLOBAL VARIABLES & FUNCTIONS
 
@@ -37,7 +39,48 @@ function getWeekdaysCount(startDate, endDate) { //Returns the length of a sessio
 
     return count;
 }
+async function generateTableObj(obj, table) { //Generate a table object for a given room or session. The result is pushed in a array that is then displayed.
 
+    const { id, name, sessions } = obj;
+    let record = await table.selectRecordAsync(id, {});
+
+    let availability = 100; //consider the trainer to be fully available before iterating through sessions
+    let overlappingSessions = [];
+    let data = { 'Name': name, 'Availability for training (%)': availability, 'Overlapping sessions': null };
+    let trainerLastSession = null;
+
+    if (table === 'trainersTable') {
+        trainerLastSession = record.getCellValue('Most recent session end date');
+        data['Last session (end date)'] = trainerLastSession;
+    }
+
+    if (sessions === null) {
+        return data;
+    }
+
+    for (let session of sessions) {
+        let sessionRecord = await sessionsTable.selectRecordAsync(session.id, {});
+        let sessionStart = new Date(sessionRecord.getCellValue('Start date'));
+        let sessionEnd = new Date(sessionRecord.getCellValue('End date'));
+
+        let overlapDays = 0;
+        if (sessionStart <= trainingEnd && sessionEnd >= trainingStart) {
+            let overlapStart = sessionStart > trainingStart ? sessionStart : trainingStart;
+            let overlapEnd = sessionEnd < trainingEnd ? sessionEnd : trainingEnd;
+
+            if (overlapStart < overlapEnd) {
+                overlapDays = getWeekdaysCount(overlapStart, overlapEnd);
+                availability -= (overlapDays / trainingLength) * 100; //off by 1 day when sharing the same startDate. investigate later.
+                if (overlapDays !== 0) overlappingSessions.push(session.name);
+            }
+        }
+    }
+
+    availability = Math.max(0, Math.round(availability));
+    data['Availability for training (%)'] = availability;
+    data['Overlapping sessions'] = overlappingSessions.join(', ');
+    return data
+}
 //sessions
 const sessionsTable = base.getTable("Sessions");
 
@@ -45,13 +88,14 @@ const sessionsTable = base.getTable("Sessions");
 const trainingsTable = base.getTable('Trainings');
 const requestedTraining = requestRecord.getCellValue('Training');
 const requestedTrainingId = requestedTraining[0].id;
-const requestedTrainingRecord = await trainingsTable.selectRecordAsync(requestedTrainingId, {
-})
-const trainingLength = requestedTrainingRecord.getCellValue('Duration (days)'); //selectedTrainingRecord can not be null because it is a required field in the form.
+const requestedTrainingRecord = await trainingsTable.selectRecordAsync(requestedTrainingId, {});
+let trainingLength = requestedTrainingRecord.getCellValue('Duration (days)'); //selectedTrainingRecord can not be null because it is a required field in the form.
 
 //trainers
-let trainersTable = base.getTable('Trainers');
+const trainersTable = base.getTable('Trainers');
 
+//rooms
+const roomsTable = base.getTable('Rooms');
 
 // COMPONENTS & CONSTRUCTORS
 
@@ -75,6 +119,29 @@ async function selectDateComponent(dateType) {
     return date;
 }
 
+// two buttons
+async function buttonsComponent(question, labelA, labelB) { // :string
+    let component = await input.buttonsAsync(`${question}`, [{ label: `${labelA}`, value: `${labelA}`, variant: 'primary' }, { label: `${labelB}`, value: `${labelB}`, variant: 'danger' }]);
+    return component;
+}
+
+// table picker with validation
+async function tablePickerComponent(label, table) { // :string, :string, :string
+    let selection = null;
+    while (selection === null) {
+        selection = await input.recordAsync(label, table);
+
+        if (selection) {
+            let validation = await buttonsComponent(`Confirm ${selection.name}?`, 'Yes', 'No')
+
+            if (validation === 'No') {
+                selection = null;
+            }
+        }
+    }
+    return selection
+}
+
 // Constructors
 function Trainer(trainer, sessions) {
     this.name = trainer.name;
@@ -94,14 +161,14 @@ function Room(room, sessions) {
 let expectedStartDate = requestRecord.getCellValue('Expected start date');
 
 if (expectedStartDate) {
-    output.text(`The training was requested to start on ${expectedStartDate}.`);
-    let validateStartDate = await input.buttonsAsync('Do you want to keep this start date?', ['Yes', 'No']);
+    output.markdown(`The training was requested to start on **${expectedStartDate}**.`);
+    let validateStartDate = await buttonsComponent('Keep this start date?', 'Yes', 'No');
 
     if (validateStartDate === 'No') {
         expectedStartDate = await selectDateComponent('start');
     }
 } else {
-    output.text(`There is no requested start date for this request. Please indicate a starting date.`);
+    output.markdown(`There is no requested start date for this request. Please **indicate a starting date.**`);
     expectedStartDate = await selectDateComponent('start');
 }
 
@@ -109,13 +176,16 @@ if (expectedStartDate) {
 // VALIDATE END DATE FLOW
 
 let expectedEndDate = getExpectedEndDate(expectedStartDate, trainingLength);
-output.text(`This training is expected to end on ${expectedEndDate.toLocaleString('sv-SE', {
+
+let expectedEndDateString = expectedEndDate.toLocaleString('sv-SE', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     timeZone: 'Europe/Amsterdam'
-})} (training length: ${trainingLength} days).`);
-let validateEndDate = await input.buttonsAsync('Do you want to keep this end date?', ['Yes', 'No']);
+})
+output.markdown(`This training is expected to end on **${expectedEndDateString}**.`);
+
+let validateEndDate = await buttonsComponent('Keep this end date?', 'Yes', 'No');
 if (validateEndDate === 'No') {
     expectedEndDate = await selectDateComponent('end');
 }
@@ -123,6 +193,8 @@ if (validateEndDate === 'No') {
 // start and end date confirmed:
 let trainingStart = new Date(expectedStartDate);
 let trainingEnd = new Date(expectedEndDate);
+trainingLength = getWeekdaysCount(trainingStart, trainingEnd) // reset value of tranining length based on user inputs.
+output.markdown(`This session will have **${trainingLength} days of training.**`);
 
 
 // DEFINE ELIGIBLE TRAINERS
@@ -150,54 +222,12 @@ async function getTrainersData() {
         }
         return eligibleTrainers;
     }
-
-    async function generateTrainerDataObj(trainerObj) {
-
-        const { id, name, sessions } = trainerObj;
-        let trainerRecord = await trainersTable.selectRecordAsync(id, {});
-
-        let trainerAvailability = 100; //consider the trainer to be fully available before iterating through sessions
-        let overlappingSessions = [];
-        let trainerLastSession = trainerRecord.getCellValue('Most recent session end date');
-
-        let trainerDataObj = { 'Name': name, 'Availability for training (%)': trainerAvailability, 'Overlapping sessions': null, 'Last session (end date)': trainerLastSession }
-
-        if (sessions === null) {
-            return trainerDataObj;
-        }
-
-        for (let session of sessions) {
-            let sessionRecord = await sessionsTable.selectRecordAsync(session.id, {});
-            let sessionStart = new Date(sessionRecord.getCellValue('Start date'));
-            let sessionEnd = new Date(sessionRecord.getCellValue('End date'));
-
-            let overlapDays = 0;
-            if (sessionStart <= trainingEnd && sessionEnd >= trainingStart) {
-                let overlapStart = sessionStart > trainingStart ? sessionStart : trainingStart;
-                let overlapEnd = sessionEnd < trainingEnd ? sessionEnd : trainingEnd;
-
-                if (overlapStart < overlapEnd) {
-                    overlapDays = getWeekdaysCount(overlapStart, overlapEnd);
-                    trainerAvailability -= (overlapDays / trainingLength) * 100;
-                    if (overlapDays !== 0) overlappingSessions.push(session.name);
-                }
-            }
-        }
-
-        trainerAvailability = Math.round(trainerAvailability) //Math.max(0, Math.round(trainerAvailability));
-        trainerDataObj = { 'Name': name, 'Availability for training (%)': trainerAvailability, 'Overlapping sessions': overlappingSessions.join(', '), 'Last session (end date)': trainerLastSession }
-        return trainerDataObj
-    }
-
     let eligibleTrainers = await getEligibileTrainers(); // define eligible trainers array - "all trainers that CAN perform the requested training"
 
     for (let eligibileTrainer of eligibleTrainers) { // for each trainer
-
-        // define trainer data
         let trainerSessions = eligibileTrainer.getCellValue('Sessions');
         const trainerObj = new Trainer(eligibileTrainer, trainerSessions);
-
-        let trainerDataObj = await generateTrainerDataObj(trainerObj);
+        let trainerDataObj = await generateTableObj(trainerObj, trainersTable);
         eligibileTrainersTable.push(trainerDataObj);
     }
 
@@ -209,28 +239,100 @@ async function getTrainersData() {
 // DISPLAY AVAILABLE TRAINERS
 
 let eligibleTrainersTable = await getTrainersData();
-output.text(`Available trainers:`);
+output.markdown(`### Trainers availabilities`);
 output.table(eligibleTrainersTable);
-//console.log(JSON.stringify(eligibleTrainersTable));
-
 
 // ASK FOR TRAINER INPUT
+let selectedTrainersArray = [];
+let selectedTrainer = await tablePickerComponent('Pick a trainer:', trainersTable);
+selectedTrainersArray.push({ id: selectedTrainer.id });
 
-let selectedTrainer = null;
-while (selectedTrainer === null) {
-    selectedTrainer = await input.recordAsync('Pick a trainer:', trainersTable);
-
-    if (selectedTrainer) {
-        let validateTrainer = await input.buttonsAsync(`Validate ${selectedTrainer.name} as a trainer for this session?`, ['Yes', 'No']);
-
-        if (validateTrainer === 'No') {
-            selectedTrainer = null;
-        }
-    }
+// second trainer
+let secondTrainerValidation = await buttonsComponent('Pick a second trainer?', 'Yes', 'No');
+let secondTrainer = null;
+if (secondTrainerValidation === 'Yes') {
+    secondTrainer = await tablePickerComponent('Pick a second trainer', trainersTable);
+    selectedTrainersArray.push({ id: secondTrainer.id });
 }
 
 // FIND AVAILABLE ROOMS
 
+async function getRoomsData() { //{'name': roomName, availability for training (%): num, Overlapping sessions: text}
+    let eligibleRoomsTable = [];
+    let rooms = await roomsTable.selectRecordsAsync({ fields: ['Sessions'] });
+
+    for (let room of rooms.records) {
+        let roomSessions = room.getCellValue('Sessions');
+        let roomObj = new Room(room, roomSessions);
+        let roomSessionData = await generateTableObj(roomObj, roomsTable);
+        eligibleRoomsTable.push(roomSessionData);
+    }
+
+    eligibleRoomsTable.sort((a, b) => b['Availability for training (%)'] - a['Availability for training (%)']);
+    return eligibleRoomsTable;
+}
+
+// DISPLAY ROOMS
+
+const eligibleRoomsTable = await getRoomsData()
+output.markdown('### Room availabilities');
+output.table(eligibleRoomsTable)
+
+// ASK FOR ROOM OR ONLINE FLOW
+output.markdown(`This session was requested as \` ${requestRecordFormat} \``);
+let sessionTypeValidation = await buttonsComponent('Choose a session type', 'In person', 'Online');
+
+let selectedRoom = null;
+if (sessionTypeValidation === 'In person') {
+    selectedRoom = await tablePickerComponent('Pick a room:', roomsTable);
+}
 
 // VERIFY END RESULT
+output.text('')
+output.markdown( // data recap
+    `### Create session
+    Click \`validate\` to create this session:
+
+    Training: ${requestedTrainingRecord.name}
+    Start date: ${expectedStartDate},
+    End date: ${expectedEndDateString},
+    Days of training: ${trainingLength},
+    Trainer: ${selectedTrainer.name},
+    Second trainer: ${secondTrainer === null ? '-' : secondTrainer.name},
+    Format: ${sessionTypeValidation},
+    Room: ${selectedRoom === null ? '-' : selectedRoom.name}`
+)
+
+function buildOutputData() {
+    let outputData = {
+        "Start date": `${expectedStartDate} 08:00`,
+        "End date": `${expectedEndDateString} 17:00`,
+        "Trainers": selectedTrainersArray,
+        "Main trainer": [{ id: selectedTrainer.id }],
+        "Format": {name: sessionTypeValidation},
+        "Duration (days)": trainingLength
+    };
+    if (secondTrainer) { outputData['Second trainer'] = [{ id: secondTrainer.id }] };
+    if (requestedTrainingRecord) { outputData['Training'] = [{ id: requestedTrainingRecord.id }] };
+    if (selectedRoom) { outputData['Room'] = [{ id: selectedRoom.id }] };
+    if (requestRecord) { outputData['Request'] = [{ id: requestRecord.id }] };
+    return outputData
+}
+
+const outputData = buildOutputData();
+
+let validateFlow = await input.buttonsAsync('', [{ label: 'Validate', variant: 'primary' }]);
+if (validateFlow === 'Validate') {
+    const createdSession = await sessionsTable.createRecordAsync(outputData);
+    const createdSessionRecord = await sessionsTable.selectRecordAsync(createdSession,{});
+    if (createdSessionRecord) { 
+        await requestsTable.updateRecordAsync(requestRecord.id,{
+            "Status": {name: 'Session created'}
+        })
+        const createdSessionUrl = createdSessionRecord.getCellValueAsString('Record URL');
+        output.markdown(`Session created: [click here](${createdSessionUrl}) to access`);
+    } else {
+        console.log("Encountered an error when creating session. Please check the Sessions table.")
+    }
+}
 // end VERIFY END RESULT
