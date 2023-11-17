@@ -1,9 +1,7 @@
 let inputConfig = input.config();
 let id = inputConfig.id;
 let trainersTable = await base.getTable('Trainers');
-let trainerRecord = await trainersTable.selectRecordAsync(id, {
-  fields: ['Most recent session end date', 'Session end dates']
-})
+let trainerRecord = await trainersTable.selectRecordAsync(id, { fields: ['Most recent session end date', 'Session end dates'] })
 
 let dates = trainerRecord.getCellValue('Session end dates');
 
